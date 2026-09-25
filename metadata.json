@@ -1,0 +1,10 @@
+{
+  "name": "TranscribeLive",
+  "description": "Real-time speech-to-text live transcription studio with multi-language support, inline editing, voice visualizer, export, and transcript history.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
