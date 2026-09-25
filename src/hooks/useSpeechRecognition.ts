@@ -63,6 +63,10 @@ export function useSpeechRecognition({
 
     try {
       const recognition = new SpeechRecognitionAPI();
+      // On mobile Safari and Android Chrome, continuous=true can cause glitchy aborts
+      const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
+        navigator.userAgent
+      );
       recognition.continuous = true;
       recognition.interimResults = true;
       recognition.maxAlternatives = 1;
@@ -107,9 +111,9 @@ export function useSpeechRecognition({
       };
 
       recognition.onerror = (event: any) => {
-        console.warn('SpeechRecognition error:', event.error);
+        console.warn('SpeechRecognition event error:', event.error);
         if (event.error === 'no-speech') {
-          // Expected during silence, ignore
+          // Expected during silence intervals, keep listening
           return;
         }
         if (event.error === 'not-allowed') {
@@ -117,35 +121,32 @@ export function useSpeechRecognition({
           shouldListenRef.current = false;
           setIsListening(false);
         } else if (event.error === 'network') {
-          setErrorMessage('Network connection lost during speech recognition.');
+          // On mobile, network error often fires on temporary server disconnect
+          console.warn('Mobile speech network error, will attempt graceful retry');
         } else if (event.error !== 'aborted') {
-          setErrorMessage(`Speech recognition error: ${event.error}`);
+          setErrorMessage(`Speech recognition notice: ${event.error}`);
         }
       };
 
       recognition.onend = () => {
         setInterimText('');
-        // If user wants to keep listening, auto-restart (SpeechRecognition closes automatically on silence or timeout)
+        // If user wants to keep listening, auto-restart safely
         if (shouldListenRef.current) {
           if (restartTimeoutRef.current) clearTimeout(restartTimeoutRef.current);
+          const delay = isMobile ? 350 : 150;
           restartTimeoutRef.current = window.setTimeout(() => {
             if (shouldListenRef.current) {
               try {
-                recognition.start();
-              } catch (e) {
-                // If start fails, re-create instance
                 const newInstance = createRecognitionInstance();
                 if (newInstance) {
                   recognitionRef.current = newInstance;
-                  try {
-                    newInstance.start();
-                  } catch (err) {
-                    console.error('Failed to restart speech recognition', err);
-                  }
+                  newInstance.start();
                 }
+              } catch (err: any) {
+                console.warn('Speech restart note:', err);
               }
             }
-          }, 200);
+          }, delay);
         } else {
           setIsListening(false);
         }

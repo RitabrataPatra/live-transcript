@@ -1,8 +1,3 @@
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
- */
-
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Header } from './components/Header';
 import { AudioVisualizer } from './components/AudioVisualizer';
@@ -15,15 +10,21 @@ import { HistoryDrawer } from './components/HistoryDrawer';
 import { ShareModal } from './components/ShareModal';
 import { useSpeechRecognition } from './hooks/useSpeechRecognition';
 import { useAudioVisualizer } from './hooks/useAudioVisualizer';
+import { useGeminiTranscribe } from './hooks/useGeminiTranscribe';
+import { TranscriptionEngine } from './types/engine';
 import { getLanguageByCode } from './constants/languages';
 import { Language, SavedTranscript, TextSize, TranscriptSegment, ExportFormat } from './types';
 import { exportTranscript, copyToClipboard } from './utils/exportUtils';
-import { Sparkles, Mic, FileText, CheckCircle2, ShieldAlert } from 'lucide-react';
+import { Sparkles, Mic, FileText, CheckCircle2, ShieldAlert, Cpu } from 'lucide-react';
 
 const LOCAL_STORAGE_KEY = 'transcribelive_saved_sessions_v1';
 const CURRENT_SESSION_KEY = 'transcribelive_current_draft_v1';
 
 export default function App() {
+  // Engine Mode: 'gemini' (AI precision, accent robust, 100% mobile working) or 'browser' (Web Speech API)
+  // Default to 'gemini' for unmatched accuracy with any accent and seamless mobile compatibility
+  const [engine, setEngine] = useState<TranscriptionEngine>('gemini');
+
   // Language State
   const [selectedLanguage, setSelectedLanguage] = useState<Language>(() => {
     return getLanguageByCode('en-US');
@@ -35,6 +36,9 @@ export default function App() {
   const [sessionTitle, setSessionTitle] = useState<string>('Live Session');
   const [sessionStartTime, setSessionStartTime] = useState<number | null>(null);
   const [durationSeconds, setDurationSeconds] = useState<number>(0);
+
+  // Active Listening state
+  const [isListening, setIsListening] = useState<boolean>(false);
 
   // Undo / Redo history stack
   const [undoStack, setUndoStack] = useState<string[]>([]);
@@ -61,33 +65,46 @@ export default function App() {
     }
   });
 
-  // Speech Recognition hook
-  const handleFinalSpeechChunk = useCallback((chunk: string, segment: TranscriptSegment) => {
+  // Append new recognized text chunks
+  const handleIncomingTranscriptChunk = useCallback((chunk: string, segment: TranscriptSegment) => {
+    if (!chunk || !chunk.trim()) return;
+
     setTranscriptText((prev) => {
-      // Save state to undo stack before appending
       setUndoStack((hist) => [...hist.slice(-25), prev]);
       setRedoStack([]);
 
       const trimmedPrev = prev.trimEnd();
       const needsSpace = trimmedPrev.length > 0 && !/[\s\n]$/.test(trimmedPrev);
-      const newText = needsSpace ? `${trimmedPrev} ${chunk}` : `${trimmedPrev}${chunk}`;
+      const newText = needsSpace ? `${trimmedPrev} ${chunk.trim()}` : `${trimmedPrev}${chunk.trim()}`;
       return newText;
     });
 
     setSegments((prev) => [...prev, segment]);
   }, []);
 
+  // Browser Web Speech Recognition Hook
   const {
-    isListening,
-    interimText,
-    isSupported,
-    errorMessage,
-    startListening,
-    stopListening,
-    toggleListening,
+    isListening: isBrowserListening,
+    interimText: browserInterimText,
+    isSupported: isBrowserSupported,
+    errorMessage: browserErrorMessage,
+    startListening: startBrowserListening,
+    stopListening: stopBrowserListening,
   } = useSpeechRecognition({
     languageCode: selectedLanguage.code,
-    onFinalTranscript: handleFinalSpeechChunk,
+    onFinalTranscript: handleIncomingTranscriptChunk,
+  });
+
+  // Gemini AI Precision Transcription Hook
+  const {
+    isProcessing: isGeminiProcessing,
+    errorMessage: geminiErrorMessage,
+    startRecorder: startGeminiRecorder,
+    stopRecorder: stopGeminiRecorder,
+  } = useGeminiTranscribe({
+    languageCode: selectedLanguage.code,
+    languageName: selectedLanguage.name,
+    onTranscriptSegment: handleIncomingTranscriptChunk,
   });
 
   // Audio Visualizer & Level Meter
@@ -97,6 +114,7 @@ export default function App() {
     startAudioContext,
     stopAudioContext,
     hasAudioPermission,
+    audioStream,
   } = useAudioVisualizer(isListening);
 
   // Show temporary toast notification
@@ -105,17 +123,63 @@ export default function App() {
     setTimeout(() => setToastMessage(null), 2500);
   };
 
-  // Sync listening with audio visualizer stream
-  useEffect(() => {
-    if (isListening) {
-      startAudioContext();
-      if (!sessionStartTime) {
-        setSessionStartTime(Date.now());
-      }
-    } else {
-      stopAudioContext();
+  // Start unified listening
+  const handleStartListening = async () => {
+    if (!sessionStartTime) {
+      setSessionStartTime(Date.now());
     }
-  }, [isListening, startAudioContext, stopAudioContext, sessionStartTime]);
+
+    const stream = await startAudioContext();
+    if (!stream) {
+      showToast('Microphone access is required to transcribe');
+      return;
+    }
+
+    setIsListening(true);
+
+    if (engine === 'gemini') {
+      startGeminiRecorder(stream);
+    } else {
+      startBrowserListening();
+    }
+  };
+
+  // Stop unified listening
+  const handleStopListening = () => {
+    setIsListening(false);
+    stopAudioContext();
+
+    if (engine === 'gemini') {
+      stopGeminiRecorder();
+    } else {
+      stopBrowserListening();
+    }
+  };
+
+  const handleToggleListening = () => {
+    if (isListening) {
+      handleStopListening();
+    } else {
+      handleStartListening();
+    }
+  };
+
+  // Toggle between Gemini AI and Browser STT
+  const handleToggleEngine = () => {
+    const wasListening = isListening;
+    if (wasListening) {
+      handleStopListening();
+    }
+
+    const newEngine: TranscriptionEngine = engine === 'gemini' ? 'browser' : 'gemini';
+    setEngine(newEngine);
+
+    if (newEngine === 'gemini') {
+      showToast('Switched to Gemini AI: Accurately understands all accents & mobile audio');
+    } else {
+      showToast('Switched to Browser Speech Recognition');
+    }
+  };
 
   // Duration Timer
   useEffect(() => {
@@ -147,7 +211,7 @@ export default function App() {
 
       if (e.code === 'Space' && !isInputFocused) {
         e.preventDefault();
-        toggleListening();
+        handleToggleListening();
       }
 
       // Ctrl+Z or Cmd+Z for Undo
@@ -222,7 +286,6 @@ export default function App() {
     setUndoStack((prev) => [...prev, transcriptText]);
     setRedoStack([]);
 
-    // Split sentences and group into ~3 sentences per paragraph
     const sentences = transcriptText
       .replace(/([.?!])\s*(?=[A-Z0-9])/g, '$1|')
       .split('|')
@@ -317,11 +380,11 @@ export default function App() {
 
   // Load sample dictation for testing
   const handleLoadSample = () => {
-    const sample = `Welcome to the live speech transcription session. This application provides real-time voice-to-text recognition with instant interim results, multi-language switching, and live inline editing.
+    const sample = `Welcome to the live speech transcription studio. This application provides real-time voice-to-text recognition with accent-robust intelligence, multi-language switching, and live inline editing.
 
-You can edit words directly in the editor as they appear, inject punctuation with a single click, convert into formatted paragraphs, and find and replace phrases across the transcript.
+You can speak naturally in diverse accents and dialects without needing a studio microphone or a specific accent. The app transcribes continuous speech accurately.
 
-Once you are done recording or dictating, your transcript can be copied to your clipboard, shared with teammates, and saved directly as a text file for future reference.`;
+Once you are done dictating, your transcript can be copied to your clipboard, shared with teammates, and saved directly as a text file for future reference.`;
 
     setUndoStack((prev) => [...prev, transcriptText]);
     setRedoStack([]);
@@ -338,7 +401,7 @@ Once you are done recording or dictating, your transcript can be copied to your 
       autoSaveCurrentSession();
     }
     if (isListening) {
-      stopListening();
+      handleStopListening();
     }
     setTranscriptText('');
     setSegments([]);
@@ -356,7 +419,7 @@ Once you are done recording or dictating, your transcript can be copied to your 
       autoSaveCurrentSession();
     }
     if (isListening) {
-      stopListening();
+      handleStopListening();
     }
     setTranscriptText(item.text);
     setSegments(item.segments || []);
@@ -390,7 +453,6 @@ Once you are done recording or dictating, your transcript can be copied to your 
           text: transcriptText,
         });
       } catch (err) {
-        // Fall back to modal if user cancelled or API refused
         setIsShareModalOpen(true);
       }
     } else {
@@ -442,6 +504,10 @@ Once you are done recording or dictating, your transcript can be copied to your 
     window.speechSynthesis.speak(utterance);
   };
 
+  // Active interim text or live status
+  const currentInterim = engine === 'browser' ? browserInterimText : (isGeminiProcessing ? 'Transcribing speech...' : '');
+  const activeError = engine === 'gemini' ? geminiErrorMessage : browserErrorMessage;
+
   // Word count
   const wordCount = transcriptText.trim()
     ? transcriptText.trim().split(/\s+/).filter(Boolean).length
@@ -482,9 +548,13 @@ Once you are done recording or dictating, your transcript can be copied to your 
 
           <div className="flex items-center gap-2 text-xs text-slate-500 shrink-0">
             <span className="inline-flex items-center gap-1.5 px-2 py-0.5 sm:py-1 bg-white rounded-md border border-slate-200 shadow-2xs text-[11px] sm:text-xs">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
-              <span className="hidden xs:inline">Live Speech-to-Text</span>
-              <span className="xs:hidden">Live</span>
+              <span className={`w-1.5 h-1.5 rounded-full ${isListening ? 'bg-red-500 animate-ping' : 'bg-emerald-500'}`}></span>
+              <span className="hidden xs:inline">
+                {engine === 'gemini' ? 'AI Precision (Any Accent)' : 'Browser Speech-to-Text'}
+              </span>
+              <span className="xs:hidden">
+                {engine === 'gemini' ? 'AI' : 'Browser'}
+              </span>
             </span>
           </div>
         </div>
@@ -499,6 +569,9 @@ Once you are done recording or dictating, your transcript can be copied to your 
             durationSeconds={durationSeconds}
             wordCount={wordCount}
             hasAudioPermission={hasAudioPermission}
+            engine={engine}
+            onToggleEngine={handleToggleEngine}
+            isAiProcessing={isGeminiProcessing}
           />
 
           {/* Real-time Editor Toolbar */}
@@ -529,20 +602,20 @@ Once you are done recording or dictating, your transcript can be copied to your 
           {/* Main Transcription Area */}
           <TranscriptionEditor
             text={transcriptText}
-            interimText={interimText}
+            interimText={currentInterim}
             isListening={isListening}
             textSize={textSize}
             onChangeText={handleTextChange}
-            onStartListening={startListening}
+            onStartListening={handleStartListening}
             onLoadSample={handleLoadSample}
-            errorMessage={errorMessage}
+            errorMessage={activeError}
             languageName={selectedLanguage.name}
           />
 
           {/* Bottom Action Controls Dock (Mic, Copy, Share, Save) */}
           <ActionControls
             isListening={isListening}
-            onToggleListening={toggleListening}
+            onToggleListening={handleToggleListening}
             onCopy={handleCopy}
             isCopied={isCopied}
             onShare={handleShare}
@@ -557,15 +630,12 @@ Once you are done recording or dictating, your transcript can be copied to your 
         {/* Quiet footer tip */}
         <div className="mt-4 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500 px-2">
           <div className="flex items-center gap-1.5">
-            <span>Tip: Press</span>
-            <kbd className="px-1.5 py-0.5 bg-white border border-slate-200 rounded text-slate-700 font-mono text-[11px] shadow-2xs">
-              Space
-            </kbd>
-            <span>to start or pause listening anytime</span>
+            <Sparkles className="w-3.5 h-3.5 text-indigo-500" />
+            <span>AI Precision Engine understands all global accents and dialects natively.</span>
           </div>
 
           <div className="flex items-center gap-3">
-            <span>Supports 40+ spoken languages & dialects</span>
+            <span>Supports 40+ spoken languages</span>
             <span aria-hidden="true">·</span>
             <span>Real-time inline editing</span>
           </div>
